@@ -1,267 +1,350 @@
 # visualization/evaluate.py
-# 模型评估与性能可视化：加载训练好的Actor，在离线数据集上评估策略质量
-# Model evaluation & performance visualization: load trained Actor, evaluate policy on offline dataset
+# Model evaluation & policy quality visualization (publication quality)
+# Nature-figure style: restrained palette, English labels, SVG/PDF/PNG export
 
 import torch
 import numpy as np
-import pandas as pd
+import matplotlib as mpl
 import matplotlib.pyplot as plt
-import matplotlib
-matplotlib.use("Agg")
-import os
-import sys
+import matplotlib.ticker as ticker
+import os, sys
 
-# Add parent directory to path / 将父目录加入搜索路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import STATE_DIM, MIN_PITCH, MAX_PITCH, REWARD_SCALE
+from config import STATE_DIM, MIN_PITCH, MAX_PITCH, REWARD_SCALE, GAMMA
 from data.dataset import load_dataset
-from data.normalizer import Normalizer
 from models.actor import Actor
 from models.cql import Critic
 
-# ---------- 中英双语字体配置 / Bilingual font config ----------
-plt.rcParams["font.family"] = "sans-serif"
-plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "DejaVu Sans"]
-plt.rcParams["axes.unicode_minus"] = False
+# Nature-figure rcParams
+mpl.rcParams.update({
+    "font.family": "sans-serif",
+    "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+    "svg.fonttype": "none",
+    "pdf.fonttype": 42,
+    "font.size": 7,
+    "axes.spines.right": False,
+    "axes.spines.top": False,
+    "axes.linewidth": 0.8,
+    "legend.frameon": False,
+    "axes.labelsize": 8,
+    "axes.titlesize": 9,
+    "xtick.labelsize": 7,
+    "ytick.labelsize": 7,
+    "xtick.major.width": 0.6,
+    "ytick.major.width": 0.6,
+    "xtick.major.size": 3,
+    "ytick.major.size": 3,
+    "lines.linewidth": 1.0,
+    "legend.fontsize": 6.5,
+    "axes.unicode_minus": False,
+})
+
+# Restrained palette
+C_DATA   = "#2B5C8F"
+C_ACTOR  = "#C44E52"
+C_BIAS   = "#D9754A"
+C_STATE  = "#3A7CA5"
+C_QRAND  = "#7F7F7F"
+C_ZERO   = "#AAAAAA"
+BG       = "#FFFFFF"
+GRID     = "#E8E8E8"
+
+
+def save_pub(fig, filename, dpi=600):
+    """Publication export: SVG + PDF + PNG"""
+    fig.savefig(f"{filename}.svg", bbox_inches="tight", dpi=dpi)
+    fig.savefig(f"{filename}.pdf", bbox_inches="tight", dpi=dpi)
+    fig.savefig(f"{filename}.png", bbox_inches="tight", dpi=dpi)
 
 
 def load_model_and_data():
-    """加载模型与数据 / Load model and data"""
-    # Load data
-    s, a, r, ns, d, norm = load_dataset("PI_OfflineData.csv")
+    """Load model and data"""
+    s, a, r, ns, d, norm, *_ = load_dataset("PI_OfflineData.csv")
 
-    # Load trained model
     actor = Actor(STATE_DIM)
     actor.load_state_dict(torch.load("output/actor_best.pth", map_location="cpu"))
     actor.eval()
 
-    # Also load critic for Q-value evaluation
     critic = Critic(STATE_DIM)
-    # critic not trained here but we can evaluate with a simple Q estimate
+    try:
+        critic.load_state_dict(torch.load("output/critic_best.pth", map_location="cpu"))
+        critic.eval()
+        has_critic = True
+    except FileNotFoundError:
+        has_critic = False
 
-    return s, a, r, ns, d, norm, actor
+    return s, a, r, ns, d, norm, actor, critic, has_critic
 
 
+# ============================================================
+# Figure 4: Action comparison (hero for policy fidelity)
+# ============================================================
 def plot_action_comparison(s, a_true, actor, save_dir="visualization"):
-    """动作对比图：Actor预测 vs 数据集真实动作 / Action comparison: Actor prediction vs dataset action"""
     with torch.no_grad():
         a_pred = actor(torch.tensor(s)).numpy().flatten()
-
     a_true = a_true.flatten()
-
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle(
-        "Policy Action vs Dataset Action\n策略动作 vs 数据集动作",
-        fontsize=15, fontweight="bold"
-    )
-
-    # ---- Scatter: predicted vs true / 散点图：预测 vs 真实 ----
-    ax = axes[0, 0]
-    ax.scatter(a_true[:2000], a_pred[:2000], alpha=0.3, s=5, c="tab:blue")
-    ax.plot([a_true.min(), a_true.max()], [a_true.min(), a_true.max()], "r--", linewidth=1.5, label="y=x (ideal)")
-    ax.set_xlabel("Dataset Action / 数据集动作 (rad)")
-    ax.set_ylabel("Actor Prediction / Actor预测 (rad)")
-    ax.set_title("Predicted vs True Action (first 2k samples)\n预测动作 vs 真实动作（前2000样本）")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    # ---- Error distribution / 误差分布 ----
     errors = a_pred - a_true
-    ax = axes[0, 1]
-    ax.hist(errors, bins=80, color="tab:orange", edgecolor="white", alpha=0.8)
-    ax.axvline(x=0, color="red", linestyle="--", linewidth=1.5, label="Zero error / 零误差")
-    ax.set_xlabel("Prediction Error / 预测误差 (rad)")
-    ax.set_ylabel("Frequency / 频数")
-    ax.set_title(
-        f"Action Error Distribution\n动作误差分布 (MAE={np.abs(errors).mean():.6f} rad, RMSE={np.sqrt(np.mean(errors**2)):.6f} rad)"
+    mae = np.abs(errors).mean()
+    rmse = np.sqrt(np.mean(errors ** 2))
+
+    fig = plt.figure(figsize=(7.2, 5.6), facecolor=BG)
+    gs = fig.add_gridspec(2, 2, width_ratios=[1, 1],
+                          wspace=0.35, hspace=0.40,
+                          left=0.10, right=0.96, top=0.91, bottom=0.10)
+    fig.suptitle(
+        "Policy Action Fidelity - Actor vs PI Controller",
+        fontsize=10, fontweight="bold", x=0.0, y=0.98, ha="left"
     )
-    ax.legend()
-    ax.grid(True, alpha=0.3)
 
-    # ---- Time-series comparison / 时序对比 ----
-    sample_idx = np.arange(min(500, len(a_true)))
-    ax = axes[1, 0]
-    ax.plot(sample_idx, a_true[sample_idx], alpha=0.7, linewidth=1.2, label="Dataset Action / 数据集动作")
-    ax.plot(sample_idx, a_pred[sample_idx], alpha=0.7, linewidth=1.2, label="Actor Prediction / Actor预测")
-    ax.set_xlabel("Sample Index / 样本序号")
-    ax.set_ylabel("Pitch Demand / 桨距角指令 (rad)")
-    ax.set_title("Action Comparison (first 500 samples)\n动作对比（前500样本）")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    # (a) Scatter: Actor vs PI
+    ax = fig.add_subplot(gs[0, 0])
+    N_s = min(3000, len(a_true))
+    idx = np.random.RandomState(42).choice(len(a_true), N_s, replace=False)
+    ax.scatter(a_true[idx], a_pred[idx], s=0.8, alpha=0.25,
+               color=C_DATA, edgecolors="none", rasterized=True)
+    lims = [a_true.min(), a_true.max()]
+    ax.plot(lims, lims, "-", color=C_ACTOR, lw=0.8, alpha=0.6)
+    ax.set_xlabel("PI Demand (rad)")
+    ax.set_ylabel("Actor Output (rad)")
+    ax.set_title("a  Predicted vs True Action")
+    ax.text(0.04, 0.96,
+            f"MAE = {mae:.4f} rad\nRMSE = {rmse:.4f} rad\nn = {N_s:,}",
+            transform=ax.transAxes, fontsize=6, va="top",
+            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=GRID, alpha=0.9))
+    ax.grid(True, alpha=0.25, lw=0.3, color=GRID)
 
-    # ---- Action distribution / 动作分布 ----
-    ax = axes[1, 1]
-    ax.hist(a_true, bins=60, alpha=0.5, color="tab:blue", label="Dataset / 数据集", density=True)
-    ax.hist(a_pred, bins=60, alpha=0.5, color="tab:orange", label="Actor / Actor预测", density=True)
-    ax.set_xlabel("Pitch Demand / 桨距角指令 (rad)")
-    ax.set_ylabel("Density / 密度")
-    ax.set_title("Action Distribution Comparison\n动作分布对比")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    # (b) Error distribution
+    ax = fig.add_subplot(gs[0, 1])
+    ax.hist(errors, bins=80, color=C_BIAS, alpha=0.7, edgecolor="white", lw=0.2)
+    ax.axvline(x=0, color=C_ZERO, linestyle="--", lw=1.0)
+    ax.set_xlabel("Prediction Error (rad)")
+    ax.set_ylabel("Count")
+    ax.set_title("b  Error Distribution")
+    ax.text(0.95, 0.92,
+            f"mean = {errors.mean():.5f}\nstd = {errors.std():.5f}",
+            transform=ax.transAxes, fontsize=6, va="top", ha="right",
+            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=GRID, alpha=0.9))
+    ax.grid(True, alpha=0.25, lw=0.3, color=GRID)
 
-    plt.tight_layout()
-    fig.savefig(f"{save_dir}/action_comparison.png", dpi=150, bbox_inches="tight")
+    # (c) Time-series overlay (first 500 samples)
+    ax = fig.add_subplot(gs[1, 0])
+    n_ts = min(500, len(a_true))
+    ax.plot(np.arange(n_ts), a_true[:n_ts], color=C_DATA, lw=0.9,
+            label="PI (dataset)")
+    ax.plot(np.arange(n_ts), a_pred[:n_ts], color=C_ACTOR, lw=0.7, alpha=0.85,
+            label="Actor")
+    ax.set_xlabel("Sample Index")
+    ax.set_ylabel("Pitch Demand (rad)")
+    ax.set_title("c  Time-series Overlay (first %d samples)" % n_ts)
+    ax.legend(fontsize=6, loc="upper right")
+    ax.grid(True, alpha=0.25, lw=0.3, color=GRID)
+
+    # (d) Action distribution
+    ax = fig.add_subplot(gs[1, 1])
+    ax.hist(a_true, bins=50, alpha=0.45, color=C_DATA, density=True,
+            label="PI (dataset)")
+    ax.hist(a_pred, bins=50, alpha=0.45, color=C_ACTOR, density=True,
+            label="Actor")
+    ax.set_xlabel("Pitch Demand (rad)")
+    ax.set_ylabel("Density")
+    ax.set_title("d  Action Distribution")
+    ax.legend(fontsize=6, loc="upper right")
+    ax.grid(True, alpha=0.25, lw=0.3, color=GRID)
+
+    save_pub(fig, f"{save_dir}/action_comparison")
     plt.close(fig)
-    print(f"[OK] Action comparison saved / 动作对比图已保存 -> {save_dir}/action_comparison.png")
+    print(f"[OK] action_comparison -> {save_dir}/action_comparison.{{svg,pdf,png}}")
 
 
-def plot_q_value_estimation(s, a, actor, critic_model_path=None, save_dir="visualization"):
-    """
-    Q值估计图 / Q-value estimation plot
-    Compare Q(s, a_dataset) vs Q(s, a_actor) to check overestimation
-    """
+# ============================================================
+# Figure 5: Q-value based policy quality
+# ============================================================
+def plot_policy_quality(s, a, actor, critic, has_critic, save_dir="visualization"):
     with torch.no_grad():
-        a_pred = actor(torch.tensor(s)).numpy()
+        a_pred = actor(torch.tensor(s)).numpy().flatten()
+    a_true = a.flatten()
+    diff = a_pred - a_true
 
-    # Compute approximate Q using reward structure directly
-    # Since we don't have a trained critic, compute the implied return from reward formula
-    # Q ≈ reward / (1 - gamma) as rough estimate
-    from config import GAMMA
+    fig = plt.figure(figsize=(7.2, 4.5), facecolor=BG)
+    gs = fig.add_gridspec(2, 3 if has_critic else 2,
+                          width_ratios=([1, 1, 0.9] if has_critic else [1, 1]),
+                          wspace=0.38, hspace=0.45,
+                          left=0.09, right=0.96, top=0.89, bottom=0.12)
 
-    # Use reward formula: r = -10 * speed_err^2 - 2 * tower_acc^2
-    # speed_err = s[:,1], tower_acc = s[:,4] (before normalization we can't directly use them)
-    # We'll estimate using inverse normalization if available
+    # (a) Action deviation histogram
+    ax = fig.add_subplot(gs[0, 0])
+    ax.hist(diff, bins=80, color=C_BIAS, alpha=0.7, edgecolor="white", lw=0.2)
+    ax.axvline(x=0, color=C_ZERO, linestyle="--", lw=1.0)
+    ax.set_xlabel("Delta a = a_actor - a_PI (rad)")
+    ax.set_ylabel("Count")
+    ax.set_title("a  Action Deviation")
+    ax.text(0.95, 0.92,
+            f"mean = {diff.mean():.4f}\nstd = {diff.std():.4f}",
+            transform=ax.transAxes, fontsize=6, va="top", ha="right",
+            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=GRID, alpha=0.9))
+    ax.grid(True, alpha=0.25, lw=0.3, color=GRID)
 
-    # Instead, let's compute a simple return estimate:
-    # For each state, compute what the reward WOULD be if we used the action
-    # We can compare actions against the dataset reward
-
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-    fig.suptitle(
-        "Policy Quality Assessment\n策略质量评估",
-        fontsize=15, fontweight="bold"
-    )
-
-    # ---- Action difference distribution / 动作差异分布 ----
-    diff = (a_pred.flatten() - a.flatten())
-    ax = axes[0]
-    ax.hist(diff, bins=80, color="tab:blue", alpha=0.7, edgecolor="white")
-    ax.axvline(x=0, color="red", linestyle="--", linewidth=2)
-    ax.set_xlabel("ΔAction / 动作差 (rad)")
-    ax.set_ylabel("Count / 计数")
-    ax.set_title(f"Action Deviation Δa = a_pred - a_true\n动作偏差 (mean={diff.mean():.5f}, std={diff.std():.5f})")
-    ax.grid(True, alpha=0.3)
-
-    # ---- Per-sample action difference / 逐样本动作差 ----
-    ax = axes[1]
+    # (b) Per-sample deviation
+    ax = fig.add_subplot(gs[0, 1])
     n_show = min(1000, len(diff))
-    ax.plot(np.arange(n_show), diff[:n_show], alpha=0.6, linewidth=0.8, color="tab:green")
-    ax.axhline(y=0, color="red", linestyle="--", linewidth=1)
-    ax.set_xlabel("Sample Index / 样本序号")
-    ax.set_ylabel("ΔAction / 动作差 (rad)")
-    ax.set_title(f"Per-sample Action Deviation\n逐样本动作偏差（前{n_show}样本）")
-    ax.grid(True, alpha=0.3)
+    ax.plot(np.arange(n_show), diff[:n_show], color=C_ACTOR, lw=0.5, alpha=0.8)
+    ax.axhline(y=0, color=C_ZERO, linestyle="--", lw=0.8)
+    ax.set_xlabel("Sample Index")
+    ax.set_ylabel("Delta a (rad)")
+    ax.set_title("b  Per-sample Deviation")
+    ax.grid(True, alpha=0.25, lw=0.3, color=GRID)
 
-    # ---- Action by state feature (pitch vs wind speed proxy) / 按状态特征的动作分布 ----
-    ax = axes[2]
-    # Use gen_speed (state dim 0) as x-axis proxy
-    state_dim0 = s[:3000, 0]  # normalized gen_speed
-    ax.scatter(state_dim0, a[:3000].flatten(), alpha=0.3, s=5, label="Dataset / 数据集", color="tab:blue")
-    ax.scatter(state_dim0, a_pred[:3000].flatten(), alpha=0.3, s=5, label="Actor / Actor预测", color="tab:orange")
-    ax.set_xlabel("GenSpeed (normalized) / 发电机转速（归一化）")
-    ax.set_ylabel("Pitch Demand / 桨距角指令 (rad)")
-    ax.set_title("Action vs Generator Speed\n动作 vs 发电机转速")
-    ax.legend(markerscale=3)
-    ax.grid(True, alpha=0.3)
+    if has_critic:
+        # (c) Q-value ranking
+        ax = fig.add_subplot(gs[0, 2])
+        s_t = torch.tensor(s[:2000]).float()
+        a_t = torch.tensor(a[:2000]).float()
+        a_p = torch.tensor(a_pred[:2000]).float().reshape(-1, 1)
+        a_r = torch.rand(2000, 1) * MAX_PITCH
+        with torch.no_grad():
+            q1_pi, q2_pi = critic(s_t, a_t)
+            q_pi = (q1_pi + q2_pi) / 2
+            q1_ac, q2_ac = critic(s_t, a_p)
+            q_ac = (q1_ac + q2_ac) / 2
+            q1_rd, q2_rd = critic(s_t, a_r)
+            q_rd = (q1_rd + q2_rd) / 2
+        labels = ["PI\n(dataset)", "Actor\npi(s)", "Random\nU(0, pi/2)"]
+        values = [q_pi.mean().item(), q_ac.mean().item(), q_rd.mean().item()]
+        colors = [C_DATA, C_ACTOR, C_QRAND]
+        bars = ax.bar(labels, values, color=colors, width=0.5, edgecolor="white", lw=0.3)
+        ax.axhline(y=0, color=C_ZERO, linestyle="--", lw=0.6)
+        ax.set_ylabel("Mean Q-value")
+        ax.set_title("c  Q-value Ranking")
+        for bar, val in zip(bars, values):
+            ax.text(bar.get_x() + bar.get_width() / 2, val + 1,
+                    f"{val:.1f}", ha="center", fontsize=6, fontweight="bold")
+        ax.grid(True, alpha=0.25, lw=0.3, color=GRID, axis="y")
 
-    plt.tight_layout()
-    fig.savefig(f"{save_dir}/policy_quality.png", dpi=150, bbox_inches="tight")
+    # (d) Action vs GenSpeed
+    row1 = 1
+    ax = fig.add_subplot(gs[row1, 0])
+    s0 = s[:3000, 0]
+    ax.scatter(s0, a_true[:3000], s=0.6, alpha=0.25, color=C_DATA,
+               edgecolors="none", rasterized=True, label="PI")
+    ax.scatter(s0, a_pred[:3000], s=0.6, alpha=0.25, color=C_ACTOR,
+               edgecolors="none", rasterized=True, label="Actor")
+    ax.set_xlabel("GenSpeed (norm.)")
+    ax.set_ylabel("Pitch (rad)")
+    ax.set_title("d  Action vs GenSpeed")
+    ax.legend(fontsize=6, loc="upper right", markerscale=3)
+    ax.grid(True, alpha=0.25, lw=0.3, color=GRID)
+
+    # (e) Action vs WindSpeed
+    ax = fig.add_subplot(gs[row1, 1])
+    s2 = s[:3000, 2]
+    ax.scatter(s2, a_true[:3000], s=0.6, alpha=0.25, color=C_DATA,
+               edgecolors="none", rasterized=True, label="PI")
+    ax.scatter(s2, a_pred[:3000], s=0.6, alpha=0.25, color=C_ACTOR,
+               edgecolors="none", rasterized=True, label="Actor")
+    ax.set_xlabel("WindSpeed (norm.)")
+    ax.set_ylabel("Pitch (rad)")
+    ax.set_title("e  Action vs WindSpeed")
+    ax.legend(fontsize=6, loc="upper right", markerscale=3)
+    ax.grid(True, alpha=0.25, lw=0.3, color=GRID)
+
+    save_pub(fig, f"{save_dir}/policy_quality")
     plt.close(fig)
-    print(f"[OK] Policy quality plot saved / 策略质量图已保存 -> {save_dir}/policy_quality.png")
+    print(f"[OK] policy_quality -> {save_dir}/policy_quality.{{svg,pdf,png}}")
 
 
+# ============================================================
+# Figure 6: State-action coverage
+# ============================================================
 def plot_state_coverage(s, a, save_dir="visualization"):
-    """
-    状态-动作覆盖分析 / State-action coverage analysis
-    Visualize state distribution and action across state dimensions
-    """
-    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
-    fig.suptitle(
-        "State-Action Coverage Analysis\n状态-动作覆盖分析",
-        fontsize=15, fontweight="bold"
-    )
-
-    state_names_en = [
-        "GenSpeed (normalized) / 发电机转速（归一化）",
-        "Speed Error (normalized) / 转速误差（归一化）",
-        "WindSpeed (normalized) / 风速（归一化）",
-        "PitchAngle (normalized) / 桨距角（归一化）",
-        "TowerAcc (normalized) / 塔架加速度（归一化）",
+    state_names = [
+        "GenSpeed",
+        "Speed Error",
+        "WindSpeed",
+        "PitchAngle",
+        "TowerAcc",
     ]
 
+    fig = plt.figure(figsize=(7.2, 5.0), facecolor=BG)
+    gs = fig.add_gridspec(2, 3, wspace=0.38, hspace=0.42,
+                          left=0.09, right=0.96, top=0.91, bottom=0.11)
+    fig.suptitle(
+        "State-Action Coverage Analysis",
+        fontsize=10, fontweight="bold", x=0.0, y=0.97, ha="left"
+    )
+
     for i in range(5):
-        ax = axes[i // 3, i % 3]
-        ax.scatter(s[:3000, i], a[:3000].flatten(), alpha=0.2, s=5, c="tab:blue")
-        ax.set_xlabel(state_names_en[i])
-        ax.set_ylabel("Action / 动作 (rad)")
-        ax.set_title(f"Action vs State Dim {i}\n动作 vs 状态维度{i}")
-        ax.grid(True, alpha=0.3)
+        ax = fig.add_subplot(gs[i // 3, i % 3])
+        ax.scatter(s[:3000, i], a[:3000].flatten(), s=0.5, alpha=0.20,
+                   color=C_STATE, edgecolors="none", rasterized=True)
+        ax.set_xlabel(state_names[i], fontsize=6.5)
+        ax.set_ylabel("Pitch (rad)", fontsize=6.5)
+        ax.set_title(f"{chr(97+i)}  Dim {i}: {state_names[i]}", fontsize=7.5)
+        ax.grid(True, alpha=0.25, lw=0.3, color=GRID)
 
-    # 6th subplot: action histogram overlay
-    ax = axes[1, 2]
-    ax.hist(a.flatten(), bins=60, color="tab:blue", alpha=0.7, edgecolor="white")
-    ax.set_xlabel("Action / 动作 (rad)")
-    ax.set_ylabel("Count / 计数")
-    ax.set_title("Action Value Distribution\n动作值分布")
-    ax.grid(True, alpha=0.3)
+    # (f) Action histogram
+    ax = fig.add_subplot(gs[1, 2])
+    ax.hist(a.flatten(), bins=50, color=C_STATE, alpha=0.7, edgecolor="white", lw=0.2)
+    ax.set_xlabel("Pitch Demand (rad)")
+    ax.set_ylabel("Count")
+    ax.set_title("f  Action Distribution")
+    ax.text(0.95, 0.92,
+            f"range = [{a.min():.3f}, {a.max():.3f}]\nmean = {a.mean():.3f}",
+            transform=ax.transAxes, fontsize=6, va="top", ha="right",
+            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=GRID, alpha=0.9))
+    ax.grid(True, alpha=0.25, lw=0.3, color=GRID)
 
-    plt.tight_layout()
-    fig.savefig(f"{save_dir}/state_action_coverage.png", dpi=150, bbox_inches="tight")
+    save_pub(fig, f"{save_dir}/state_action_coverage")
     plt.close(fig)
-    print(f"[OK] State-action coverage saved / 状态动作覆盖图已保存 -> {save_dir}/state_action_coverage.png")
+    print(f"[OK] state_action_coverage -> {save_dir}/state_action_coverage.{{svg,pdf,png}}")
 
 
+# ============================================================
 def print_evaluation_metrics(s, a, r, actor):
-    """打印评估指标 / Print evaluation metrics"""
     with torch.no_grad():
         a_pred = actor(torch.tensor(s)).numpy().flatten()
-
     a_true = a.flatten()
     mae = np.abs(a_pred - a_true).mean()
     rmse = np.sqrt(np.mean((a_pred - a_true) ** 2))
     max_err = np.abs(a_pred - a_true).max()
 
-    # Action statistics
-    print("\n" + "=" * 60)
-    print("EVALUATION METRICS / 评估指标")
-    print("=" * 60)
-    print(f"{'MAE (Mean Absolute Error) / 平均绝对误差':<50s}: {mae:.6f} rad")
-    print(f"{'RMSE (Root Mean Square Error) / 均方根误差':<50s}: {rmse:.6f} rad")
-    print(f"{'Max Absolute Error / 最大绝对误差':<50s}: {max_err:.6f} rad")
-    print(f"{'Dataset Action Mean / 数据集动作均值':<50s}: {a_true.mean():.6f} rad")
-    print(f"{'Actor Action Mean / Actor动作均值':<50s}: {a_pred.mean():.6f} rad")
-    print(f"{'Dataset Action Std / 数据集动作标准差':<50s}: {a_true.std():.6f} rad")
-    print(f"{'Actor Action Std / Actor动作标准差':<50s}: {a_pred.std():.6f} rad")
-    print(f"{'Action Range (Dataset) / 数据集动作范围':<50s}: [{a_true.min():.6f}, {a_true.max():.6f}]")
-    print(f"{'Action Range (Actor) / Actor动作范围':<50s}: [{a_pred.min():.6f}, {a_pred.max():.6f}]")
-    print(f"{'Pitch Range Limit / 桨距角限制范围':<50s}: [{MIN_PITCH}, {MAX_PITCH}]")
-    print(f"{'Average Reward (scaled) / 平均即时奖励（缩放后）':<50s}: {r.mean():.6f}")
-    print(f"{'Average Reward (original) / 平均即时奖励（原始）':<50s}: {r.mean() / REWARD_SCALE:.6f}")
-    print("=" * 60)
+    print("\n" + "=" * 62)
+    print("  Evaluation Metrics")
+    print("=" * 62)
+    print(f"  {'MAE':<40s}: {mae:.6f} rad")
+    print(f"  {'RMSE':<40s}: {rmse:.6f} rad")
+    print(f"  {'Max Error':<40s}: {max_err:.6f} rad")
+    print(f"  {'Dataset Mean':<40s}: {a_true.mean():.6f} rad")
+    print(f"  {'Actor Mean':<40s}: {a_pred.mean():.6f} rad")
+    print(f"  {'Dataset Std':<40s}: {a_true.std():.6f} rad")
+    print(f"  {'Actor Std':<40s}: {a_pred.std():.6f} rad")
+    print(f"  {'Dataset Range':<40s}: [{a_true.min():.4f}, {a_true.max():.4f}]")
+    print(f"  {'Actor Range':<40s}: [{a_pred.min():.4f}, {a_pred.max():.4f}]")
+    print(f"  {'Pitch Limit':<40s}: [{MIN_PITCH}, {MAX_PITCH}]")
+    print("=" * 62)
 
-    # Quick verdict
     if mae < 0.01:
-        verdict = "EXCELLENT / 优秀 — Actor closely matches the behavior policy"
+        verdict = "EXCELLENT - RL policy highly consistent with PI controller"
     elif mae < 0.05:
-        verdict = "GOOD / 良好 — Minor deviation from behavior policy"
+        verdict = "GOOD - RL policy mostly consistent with PI controller"
     elif mae < 0.1:
-        verdict = "FAIR / 一般 — Noticeable deviation, check training"
+        verdict = "FAIR - Noticeable deviation detected, check training"
     else:
-        verdict = "POOR / 较差 — Large deviation, training may need tuning"
-    print(f"VERDICT / 评估结论: {verdict}")
-    print("=" * 60 + "\n")
+        verdict = "POOR - Large deviation, training may need adjustment"
+    print(f"  Verdict: {verdict}")
+    print("=" * 62 + "\n")
 
 
+# ============================================================
 if __name__ == "__main__":
-    print("Loading model and data... / 正在加载模型与数据...")
-    s, a, r, ns, d, norm, actor = load_model_and_data()
-    print(f"Loaded: {len(s)} samples / 已加载 {len(s)} 个样本")
+    print("Loading model & data...")
+    s, a, r, ns, d, norm, actor, critic, has_critic = load_model_and_data()
+    print(f"  Loaded: {len(s):,} samples  |  "
+          f"Critic: {'available' if has_critic else 'unavailable'}\n")
 
-    # Run evaluations
     print_evaluation_metrics(s, a, r, actor)
     plot_action_comparison(s, a, actor)
-    plot_q_value_estimation(s, a, actor)
+    plot_policy_quality(s, a, actor, critic, has_critic)
     plot_state_coverage(s, a)
 
-    print("\nAll evaluation plots generated / 所有评估图片已生成.")
+    print("Done - SVG + PDF + PNG exported.\n")

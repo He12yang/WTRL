@@ -1,5 +1,6 @@
 # data/dataset.py
 # 离线数据集加载与预处理：读取CSV、构造状态/动作/奖励/下一状态/done五元组，并进行归一化
+# v2: 奖励零均值+单位方差归一化，避免Q值系统性偏移
 
 import pandas as pd
 import numpy as np
@@ -13,17 +14,11 @@ def load_dataset(csv_file):
     df = pd.read_csv(csv_file, index_col=False)
 
     gen_speed = df["GenSpeed"].values
-
     gen_ref = df["GenSpeed_Ref"].values
-
     speed_error = gen_ref - gen_speed
-
     wind_speed = df["WindSpeed"].values
-
     pitch = df["PitchAngle_Mea"].values
-
     tower_acc = df["TowerAcc"].values
-
     action = df["Action_PI_Dem"].values
 
     state = np.column_stack(
@@ -36,13 +31,18 @@ def load_dataset(csv_file):
         ]
     )
 
-    reward = build_reward(
-        speed_error,
-        tower_acc
-    )
+    reward = build_reward(speed_error, tower_acc)
 
-    # 奖励缩放：将~[-200,0]映射到~[-2,0]，提升训练数值稳定性
+    # 奖励缩放：将~[-200,0]映射到~[-2,0]
     reward = reward * REWARD_SCALE
+
+    # ---- 奖励归一化：零均值 + 单位方差 ----
+    # 避免Q值系统性偏向负值，防止CQL惩罚项引发Q值发散
+    reward_mean = reward.mean()
+    reward_std = reward.std() + 1e-8
+    reward = (reward - reward_mean) / reward_std
+    print(f"      → 奖励归一化: mean={reward_mean:.4f} → 0.00, std={reward_std:.4f} → 1.00")
+    print(f"      → 归一化后奖励范围: [{reward.min():.4f}, {reward.max():.4f}]")
 
     next_state = np.vstack(
         [
@@ -52,15 +52,11 @@ def load_dataset(csv_file):
     )
 
     done = np.zeros(len(state))
-
     done[-1] = 1
 
     norm = Normalizer()
-
     norm.fit(state)
-
     state = norm.transform(state)
-
     next_state = norm.transform(next_state)
 
     return (
@@ -69,7 +65,9 @@ def load_dataset(csv_file):
         reward.reshape(-1, 1).astype(np.float32),
         next_state.astype(np.float32),
         done.reshape(-1, 1).astype(np.float32),
-        norm
+        norm,
+        reward_mean,   # 新增：用于后续反归一化
+        reward_std,    # 新增：用于后续反归一化
     )
 
 
